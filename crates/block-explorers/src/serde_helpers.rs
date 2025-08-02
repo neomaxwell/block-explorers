@@ -1,5 +1,5 @@
 use crate::block_number::BlockNumber;
-use alloy_primitives::{U256, U64};
+use alloy_primitives::{Address, U256, U64};
 use serde::{Deserialize, Deserializer};
 use std::str::FromStr;
 
@@ -159,4 +159,18 @@ where
 {
     let num = StringifiedBlockNumber::deserialize(deserializer)?;
     num.try_into().map_err(serde::de::Error::custom)
+}
+
+/// Support parse Option<Address>
+pub fn deserialize_address_opt<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match <&'de str>::deserialize(deserializer)? {
+        "" => Ok(None),
+        s => {
+            let address = s.parse().map_err(serde::de::Error::custom)?;
+            Ok(Some(address))
+        }
+    }
 }

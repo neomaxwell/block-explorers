@@ -578,7 +578,7 @@ impl Cache {
 }
 
 /// The API response type
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response<T> {
     pub status: String,
     pub message: String,

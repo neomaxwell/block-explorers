@@ -1,18 +1,18 @@
 use crate::{
     block_number::BlockNumber,
     serde_helpers::{
-        deserialize_stringified_block_number, deserialize_stringified_numeric,
-        deserialize_stringified_numeric_opt, deserialize_stringified_u64,
-        deserialize_stringified_u64_opt,
+        deserialize_address_opt, deserialize_stringified_block_number,
+        deserialize_stringified_numeric, deserialize_stringified_numeric_opt,
+        deserialize_stringified_u64, deserialize_stringified_u64_opt,
     },
     Client, EtherscanError, Query, Response, Result,
 };
 use alloy_primitives::{Address, Bytes, B256, U256};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
-    borrow::Cow,
     collections::HashMap,
     fmt::{Display, Error, Formatter},
+    str::FromStr,
 };
 
 /// The raw response from the balance-related API endpoints
@@ -20,93 +20,6 @@ use std::{
 pub struct AccountBalance {
     pub account: Address,
     pub balance: String,
-}
-
-mod genesis_string {
-    use super::*;
-    use serde::{
-        de::{DeserializeOwned, Error as _},
-        ser::Error as _,
-        Deserializer, Serializer,
-    };
-
-    pub(crate) fn serialize<T, S>(
-        value: &GenesisOption<T>,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error>
-    where
-        T: Serialize,
-        S: Serializer,
-    {
-        let json = match value {
-            GenesisOption::None => Cow::from(""),
-            GenesisOption::Genesis => Cow::from("GENESIS"),
-            GenesisOption::Some(value) => {
-                serde_json::to_string(value).map_err(S::Error::custom)?.into()
-            }
-        };
-        serializer.serialize_str(&json)
-    }
-
-    pub(crate) fn deserialize<'de, T, D>(
-        deserializer: D,
-    ) -> std::result::Result<GenesisOption<T>, D::Error>
-    where
-        T: DeserializeOwned,
-        D: Deserializer<'de>,
-    {
-        let json = Cow::<'de, str>::deserialize(deserializer)?;
-        if !json.is_empty() && !json.starts_with("GENESIS") {
-            serde_json::from_str(&format!("\"{}\"", &json))
-                .map(GenesisOption::Some)
-                .map_err(D::Error::custom)
-        } else if json.starts_with("GENESIS") {
-            Ok(GenesisOption::Genesis)
-        } else {
-            Ok(GenesisOption::None)
-        }
-    }
-}
-
-mod json_string {
-    use super::*;
-    use serde::{
-        de::{DeserializeOwned, Error as _},
-        ser::Error as _,
-        Deserializer, Serializer,
-    };
-
-    pub(crate) fn serialize<T, S>(
-        value: &Option<T>,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error>
-    where
-        T: Serialize,
-        S: Serializer,
-    {
-        let json = match value {
-            Option::None => Cow::from(""),
-            Option::Some(value) => serde_json::to_string(value).map_err(S::Error::custom)?.into(),
-        };
-        serializer.serialize_str(&json)
-    }
-
-    pub(crate) fn deserialize<'de, T, D>(
-        deserializer: D,
-    ) -> std::result::Result<Option<T>, D::Error>
-    where
-        T: DeserializeOwned,
-        D: Deserializer<'de>,
-    {
-        let json = Cow::<'de, str>::deserialize(deserializer)?;
-        if json.is_empty() {
-            Ok(Option::None)
-        } else {
-            serde_json::from_str(&format!("\"{}\"", &json))
-                .map(Option::Some)
-                .map_err(D::Error::custom)
-        }
-    }
 }
 
 /// Possible values for some field responses.
@@ -142,6 +55,42 @@ impl<T> GenesisOption<T> {
     }
 }
 
+impl<T> Serialize for GenesisOption<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::None => serializer.serialize_str(""),
+            Self::Genesis => serializer.serialize_str("GENESIS"),
+            Self::Some(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for GenesisOption<T>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match <&'de str>::deserialize(deserializer)? {
+            "" => Ok(Self::None),
+            "GENESIS" => Ok(Self::Genesis),
+            s => {
+                let value = s.parse().map_err(serde::de::Error::custom)?;
+                Ok(Self::Some(value))
+            }
+        }
+    }
+}
+
 /// The raw response from the transaction list API endpoint
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,17 +99,15 @@ pub struct NormalTransaction {
     #[serde(deserialize_with = "deserialize_stringified_block_number")]
     pub block_number: BlockNumber,
     pub time_stamp: String,
-    #[serde(with = "genesis_string")]
     pub hash: GenesisOption<B256>,
-    #[serde(with = "json_string")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<U256>,
-    #[serde(with = "json_string")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_hash: Option<U256>,
     #[serde(deserialize_with = "deserialize_stringified_u64_opt")]
     pub transaction_index: Option<u64>,
-    #[serde(with = "genesis_string")]
     pub from: GenesisOption<Address>,
-    #[serde(with = "json_string")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<Address>,
     #[serde(deserialize_with = "deserialize_stringified_numeric")]
     pub value: U256,
@@ -168,10 +115,14 @@ pub struct NormalTransaction {
     pub gas: U256,
     #[serde(deserialize_with = "deserialize_stringified_numeric_opt")]
     pub gas_price: Option<U256>,
-    #[serde(rename = "txreceipt_status")]
+    #[serde(rename(deserialize = "txreceipt_status"))]
     pub tx_receipt_status: String,
     pub input: Bytes,
-    #[serde(with = "json_string")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_address_opt"
+    )]
     pub contract_address: Option<Address>,
     #[serde(deserialize_with = "deserialize_stringified_numeric")]
     pub gas_used: U256,
@@ -180,7 +131,7 @@ pub struct NormalTransaction {
     #[serde(deserialize_with = "deserialize_stringified_u64")]
     pub confirmations: u64,
     pub method_id: Option<Bytes>,
-    #[serde(with = "json_string")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function_name: Option<String>,
 }
 
@@ -193,13 +144,10 @@ pub struct InternalTransaction {
     pub time_stamp: String,
     pub hash: B256,
     pub from: Address,
-    #[serde(with = "genesis_string")]
     pub to: GenesisOption<Address>,
     #[serde(deserialize_with = "deserialize_stringified_numeric")]
     pub value: U256,
-    #[serde(with = "genesis_string")]
     pub contract_address: GenesisOption<Address>,
-    #[serde(with = "genesis_string")]
     pub input: GenesisOption<Bytes>,
     #[serde(rename = "type")]
     pub result_type: String,
@@ -261,7 +209,7 @@ pub struct ERC721TokenTransferEvent {
     pub from: Address,
     pub contract_address: Address,
     pub to: Option<Address>,
-    #[serde(rename = "tokenID")]
+    #[serde(rename(deserialize = "tokenID"))]
     pub token_id: String,
     pub token_name: String,
     pub token_symbol: String,
@@ -296,7 +244,7 @@ pub struct ERC1155TokenTransferEvent {
     pub from: Address,
     pub contract_address: Address,
     pub to: Option<Address>,
-    #[serde(rename = "tokenID")]
+    #[serde(rename(deserialize = "tokenID"))]
     pub token_id: String,
     pub token_value: String,
     pub token_name: String,
@@ -347,7 +295,8 @@ impl Display for Tag {
 }
 
 /// The list sorting preference
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Sort {
     Asc,
     Desc,
@@ -694,7 +643,7 @@ mod tests {
     // <https://github.com/gakonst/ethers-rs/issues/2612>
     #[test]
     fn can_parse_response_2612() {
-        let err = r#"{
+        let json = r#"{
   "status": "1",
   "message": "OK",
   "result": [
@@ -722,6 +671,8 @@ mod tests {
     }
   ]
 }"#;
-        let _resp: Response<Vec<NormalTransaction>> = serde_json::from_str(err).unwrap();
+        let resp: Response<Vec<NormalTransaction>> = serde_json::from_str(json).unwrap();
+
+        let _resp_json = serde_json::to_string(&resp).unwrap();
     }
 }
